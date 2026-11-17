@@ -1,14 +1,37 @@
 import React, { useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { Sparkles, Printer, RefreshCw, AlertCircle, CheckCircle, Star } from 'lucide-react';
+import { Sparkles, Printer, RefreshCw, AlertCircle, CheckCircle, Star, FileDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { apiUrl } from '../utils/api';
+import { downloadQrPdf } from '../utils/pdfGenerator';
 
 export default function AdminGenerator() {
   const [points, setPoints] = useState(10);
+  const [selectedSeries, setSelectedSeries] = useState('normal');
   const [loading, setLoading] = useState(false);
+  const [pdfLoading, setPdfLoading] = useState(false);
   const [error, setError] = useState(null);
   const [generatedData, setGeneratedData] = useState(null);
+
+  const handleDownloadPdf = async () => {
+    if (!generatedData) return;
+    setPdfLoading(true);
+    try {
+      const lotNumber = generatedData.lotNumber || 0;
+      const card = {
+        uid: generatedData.token,
+        lotNumber,
+        series: generatedData.series || selectedSeries,
+        points: generatedData.points || points,
+        claimUrl: `${window.location.origin}/claim?token=${generatedData.token}`,
+      };
+      await downloadQrPdf([card], `Lot_${lotNumber}.pdf`);
+    } catch (err) {
+      console.error('PDF generation failed:', err);
+    } finally {
+      setPdfLoading(false);
+    }
+  };
 
   const handleGenerate = async (e) => {
     e.preventDefault();
@@ -27,7 +50,7 @@ export default function AdminGenerator() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ points: Number(points) }),
+        body: JSON.stringify({ points: Number(points), series: selectedSeries }),
       });
 
       const rawText = await response.text();
@@ -134,6 +157,37 @@ export default function AdminGenerator() {
 
       {/* Configuration Form */}
       <form onSubmit={handleGenerate} className="space-y-5">
+        <div>
+          <label className="block text-sm font-medium text-brand-charcoal mb-1.5">
+            QR Series
+          </label>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+            {[
+              { id: 'normal', name: 'Normal', start: 'Continuous' },
+              { id: 'a', name: 'Series A', start: '1001+' },
+              { id: 'b', name: 'Series B', start: '2001+' },
+              { id: 'c', name: 'Series C', start: '3001+' },
+              { id: 'd', name: 'Series D', start: '5001+' },
+            ].map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => setSelectedSeries(s.id)}
+                className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center ${
+                  selectedSeries === s.id
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                    : 'bg-gray-50 text-gray-700 border-gray-200 hover:border-blue-400'
+                }`}
+              >
+                <span className="font-bold text-xs">{s.name}</span>
+                <span className={`text-[10px] font-mono ${selectedSeries === s.id ? 'text-yellow-300' : 'text-gray-400'}`}>
+                  {s.start}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+
         <div>
           <label htmlFor="points-input" className="block text-sm font-medium text-brand-charcoal mb-1.5">
             Points to Award
@@ -297,6 +351,26 @@ export default function AdminGenerator() {
                 <Sparkles className="w-4 h-4 animate-pulse" />
                 Open Live Link in New Tab
               </a>
+
+              <button
+                id="download-pdf-btn"
+                type="button"
+                onClick={handleDownloadPdf}
+                disabled={pdfLoading}
+                className="w-full py-2.5 bg-[#11358B] hover:bg-[#0a2460] disabled:opacity-60 text-white font-medium rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer text-sm font-semibold shadow-xs"
+              >
+                {pdfLoading ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Generating PDF...</span>
+                  </>
+                ) : (
+                  <>
+                    <FileDown className="w-4 h-4" />
+                    <span>Download</span>
+                  </>
+                )}
+              </button>
 
               <button
                 id="print-btn"

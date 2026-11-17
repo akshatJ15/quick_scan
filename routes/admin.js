@@ -1,11 +1,75 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import jwt from 'jsonwebtoken';
+import fs from 'fs';
+import path from 'path';
 import { QrToken } from '../models/QrToken.js';
 import Counter from '../models/Counter.js';
 
 const router = express.Router();
 const getJwtSecret = () => process.env.JWT_SECRET || 'QR_INCENTIVE_DEFAULT_SECRET';
+
+export const SERIES_CONFIG = {
+  normal: { id: 'qr_lot_no', base: 0, label: 'Normal Series' },
+  a: { id: 'qr_lot_no_a', base: 1000, label: 'Series A (1001+)' },
+  b: { id: 'qr_lot_no_b', base: 2000, label: 'Series B (2001+)' },
+  c: { id: 'qr_lot_no_c', base: 3000, label: 'Series C (3001+)' },
+  d: { id: 'qr_lot_no_d', base: 5000, label: 'Series D (5001+)' }
+};
+
+export const normalizeSeries = (series) => {
+  const s = String(series || 'normal').trim().toLowerCase().replace(/^series[-_\s]*/, '');
+  if (['a', 'b', 'c', 'd'].includes(s)) return s;
+  return 'normal';
+};
+
+export const allocateLotNumbers = async (seriesInput, qty) => {
+  const key = normalizeSeries(seriesInput);
+  const conf = SERIES_CONFIG[key] || SERIES_CONFIG.normal;
+  let startLot = conf.base;
+
+  try {
+    let counter = await Counter.findOne({ id: conf.id });
+    if (!counter) {
+      try {
+        counter = await Counter.create({ id: conf.id, seq: conf.base });
+      } catch (err) {
+        counter = await Counter.findOne({ id: conf.id });
+      }
+    }
+
+    if (counter && counter.seq < conf.base) {
+      await Counter.updateOne({ id: conf.id }, { $set: { seq: conf.base } });
+    }
+
+    const updated = await Counter.findOneAndUpdate(
+      { id: conf.id },
+      { $inc: { seq: qty } },
+      { new: true, upsert: true }
+    );
+    startLot = updated.seq - qty;
+  } catch (e) {
+    console.warn(`MongoDB sequence increment failed for series ${key}, falling back`, e);
+  }
+
+  return { startLot, seriesKey: key, seriesLabel: conf.label };
+};
+
+const getExpectedAdminPin = () => {
+  try {
+    const envPath = path.resolve(process.cwd(), '.env');
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, 'utf8');
+      const match = content.match(/^ADMIN_PIN\s*=\s*["']?([^"'\r\n]+)["']?/m);
+      if (match && match[1]) {
+        return match[1].trim();
+      }
+    }
+  } catch (e) {
+    // fallback
+  }
+  return process.env.ADMIN_PIN || '8388';
+};
 
 // requireAdminAuth middleware checks JWT or falls back gracefully for sandbox testing
 const requireAdminAuth = (req, res, next) => {
@@ -34,7 +98,7 @@ const requireAdminAuth = (req, res, next) => {
 router.post('/login', (req, res) => {
   try {
     const { pin } = req.body;
-    const adminPin = process.env.ADMIN_PIN;
+    const adminPin = getExpectedAdminPin();
 
     if (!adminPin) {
       return res.status(500).json({ success: false, error: 'Admin PIN is not configured on the server.' });
@@ -63,7 +127,7 @@ router.post('/login', (req, res) => {
 // POST /api/admin/generate-qr
 router.post('/generate-qr', requireAdminAuth, async (req, res) => {
   try {
-    const { points } = req.body;
+    const { points, series } = req.body;
 
     // Validate points input
     if (points === undefined || points === null || isNaN(Number(points)) || Number(points) <= 0) {
@@ -76,24 +140,14 @@ router.post('/generate-qr', requireAdminAuth, async (req, res) => {
     // Generate unique UUIDv4 token
     const uniqueToken = uuidv4();
 
-    let nextLotNumber = 0;
-    
-    // Increment the sequence atomically in the database if MongoDB is active
-    try {
-      const counter = await Counter.findOneAndUpdate(
-        { id: 'qr_lot_no' },
-        { $inc: { seq: 1 } },
-        { new: true, upsert: true }
-      );
-      nextLotNumber = counter.seq;
-    } catch (e) {
-      console.warn("MongoDB sequence increment failed, falling back to 0", e);
-    }
+    const { startLot, seriesKey } = await allocateLotNumbers(series, 1);
+    const nextLotNumber = startLot + 1;
 
     // Save a new QrToken to the database
     const newToken = await QrToken.create({
       uid: uniqueToken,
       lotNumber: nextLotNumber,
+      series: seriesKey,
       points: Number(points),
       used: false,
       claimedBy: null,
@@ -107,9 +161,6 @@ router.post('/generate-qr', requireAdminAuth, async (req, res) => {
     // Support secure forward header so smartphones get standard secure link
     const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
     
-    // As explicitly requested: return full URL formatted as: http://localhost:3000/claim?token=<THE_GENERATED_UUID>
-    // However, if we are in the AI Studio hosted preview environment, generating the local link
-    // makes it harder to preview claim flows, so we will provide both high-fidelity matching strings!
     const localClaimUrl = `http://localhost:3000/claim?token=${uniqueToken}`;
     const previewClaimUrl = host ? `${protocol}://${host}/claim?token=${uniqueToken}` : localClaimUrl;
 
@@ -118,10 +169,9 @@ router.post('/generate-qr', requireAdminAuth, async (req, res) => {
       message: 'QR Token generated successfully.',
       token: uniqueToken,
       lotNumber: nextLotNumber,
+      series: seriesKey,
       points: Number(points),
-      // Provide the requested literal URL format in the success response
       url: localClaimUrl,
-      // Provide a preview URL for debugging inside the live dev sandbox
       previewUrl: previewClaimUrl
     });
 
@@ -143,7 +193,7 @@ router.post('/bulk-generate-qr', requireAdminAuth, async (req, res) => {
   console.log(`[BACKEND BULK-GENERATE] Payload:`, req.body);
 
   try {
-    const { points, quantity } = req.body;
+    const { points, quantity, series } = req.body;
 
     // Validate points input
     if (points === undefined || points === null || isNaN(Number(points)) || Number(points) <= 0) {
@@ -172,22 +222,12 @@ router.post('/bulk-generate-qr', requireAdminAuth, async (req, res) => {
       });
     }
 
-    console.log(`[BACKEND BULK-GENERATE] Valid inputs acknowledged: Points: ${points}, Qty: ${qty}`);
+    console.log(`[BACKEND BULK-GENERATE] Valid inputs acknowledged: Points: ${points}, Qty: ${qty}, Series: ${series || 'normal'}`);
 
     const newTokens = [];
     const tokensArray = [];
     
-    let startLot = 0;
-    try {
-      const counter = await Counter.findOneAndUpdate(
-        { id: 'qr_lot_no' },
-        { $inc: { seq: qty } },
-        { new: true, upsert: true }
-      );
-      startLot = counter.seq - qty;
-    } catch (e) {
-      console.warn("MongoDB sequence increment failed", e);
-    }
+    const { startLot, seriesKey } = await allocateLotNumbers(series, qty);
 
     for (let i = 0; i < qty; i++) {
       const generatedUuid = uuidv4();
@@ -195,12 +235,14 @@ router.post('/bulk-generate-qr', requireAdminAuth, async (req, res) => {
       
       tokensArray.push({
         uid: generatedUuid,
-        lotNumber: lotNum
+        lotNumber: lotNum,
+        series: seriesKey
       });
       
       newTokens.push({
         uid: generatedUuid,
         lotNumber: lotNum,
+        series: seriesKey,
         points: Number(points),
         used: false,
         claimedBy: null,

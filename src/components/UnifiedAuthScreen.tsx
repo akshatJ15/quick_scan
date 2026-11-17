@@ -405,7 +405,7 @@ export default function UnifiedAuthScreen({
                       <input
                         type="password"
                         maxLength={6}
-                        placeholder="••••••"
+                        placeholder="••••"
                         value={adminPin}
                         onChange={(e) => setAdminPin(e.target.value)}
                         required

@@ -266,7 +266,7 @@ router.get('/qr-lots', requireAdminAuth, async (req, res) => {
     allTokens.forEach(token => {
       const lotNum = token.lotNumber || 0;
       if (!lotsMap[lotNum]) {
-        lotsMap[lotNum] = { lotNumber: lotNum, totalTokens: 0, claimedTokens: 0, tokens: [] };
+        lotsMap[lotNum] = { lotNumber: lotNum, series: token.series || 'normal', totalTokens: 0, claimedTokens: 0, tokens: [] };
       }
       lotsMap[lotNum].totalTokens++;
       if (token.used) lotsMap[lotNum].claimedTokens++;
@@ -278,6 +278,8 @@ router.get('/qr-lots', requireAdminAuth, async (req, res) => {
       
       lotsMap[lotNum].tokens.push({
         uid: token.uid,
+        lotNumber: token.lotNumber,
+        series: token.series || 'normal',
         points: token.points,
         used: token.used,
         claimedBy: token.claimedBy,
@@ -328,6 +330,7 @@ router.get('/export', requireAdminAuth, async (req, res) => {
 
       return {
         "QR Token": t.uid,
+        "Series": (t.series || 'normal').toUpperCase(),
         "Lot No.": t.lotNumber || 0,
         "Points": t.points,
         "Claimed": t.used ? 'TRUE' : 'FALSE',
